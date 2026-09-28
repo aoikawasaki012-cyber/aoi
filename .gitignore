@@ -1,0 +1,5 @@
+# Enemy models are loaded on the player's device and must not be redistributed
+*.pmx
+*.pmd
+*.vmd
+*.zip

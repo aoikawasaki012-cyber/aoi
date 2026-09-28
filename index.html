@@ -170,6 +170,17 @@
   .sens { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; font-size: 12px; color: var(--dim); letter-spacing: 0.1em; }
   .sens input { width: 100%; accent-color: var(--cyan); }
   .sens output { font-variant-numeric: tabular-nums; color: var(--ink); min-width: 2ch; text-align: right; }
+  .model { display: grid; gap: 6px; border: 1px dashed rgba(45, 225, 252, 0.35); padding: 10px 12px; }
+  .model-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .model-btn, .model-clear {
+    font-family: var(--font); font-weight: 600; font-size: 13px; letter-spacing: 0.06em; cursor: pointer;
+    color: var(--ink); background: rgba(45, 225, 252, 0.14); border: 1px solid var(--cyan); padding: 8px 12px;
+  }
+  .model-clear { background: transparent; border-color: rgba(232, 241, 255, 0.35); }
+  .model-btn:focus-within, .model-clear:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .model-status { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  .model-status.ok { color: var(--heal); }
+  .model-note { font-size: 11px; color: var(--dim); line-height: 1.5; font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
   .go {
     font-family: var(--font); font-size: 20px; font-weight: 700; letter-spacing: 0.2em;
     color: #140d00; background: var(--amber); border: 0; padding: 14px 18px; cursor: pointer;
@@ -244,6 +255,15 @@
       <div class="foe"><span class="gem" style="background:var(--amber)"></span><b>TANK</b>WAVE 3から。硬くて3連射</div>
       <div class="foe"><span class="gem" style="background:var(--heal);transform:none;border-radius:2px"></span><b>REPAIR</b>拾うとアーマー回復</div>
     </div>
+    <div class="model">
+      <div class="model-row">
+        <label class="model-btn" for="modelInput">敵モデルを読み込む (.zip)</label>
+        <input id="modelInput" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden>
+        <button class="model-clear" id="modelClear" type="button" hidden>外す</button>
+      </div>
+      <div class="model-status" id="modelStatus">標準の敵を使用中</div>
+      <div class="model-note">MMDモデル（.pmx とテクスチャ）を入れたZIPを選んでね。ファイルはこの端末の中だけで使われ、どこにもアップロードされません。</div>
+    </div>
     <label class="sens" for="sensInput">感度 <input id="sensInput" type="range" min="2" max="12" step="1" value="6"><output id="sensOut">6</output></label>
     <button class="go" id="startBtn" type="button">START</button>
     <div class="best" id="bestStart">BEST 0</div>
@@ -275,6 +295,11 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mmd-parser@1.0.4/build/mmdparser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/TGALoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/MMDLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 <script>
 (() => {
   'use strict';
@@ -538,6 +563,55 @@
 
   let enemies = [], ebullets = [], pickups = [];
   const bulletGeo = new THREE.SphereGeometry(0.15, 10, 8);
+  const hitMat = new THREE.MeshBasicMaterial({ visible: false });
+  const ringGeo = new THREE.RingGeometry(0.55, 0.7, 32);
+  // Filled in by the model loader: { drone: role, rusher: role, tank: role }
+  let customModels = null;
+
+  function buildEnemyVisual(e) {
+    const T = e.T;
+    const role = customModels && customModels[e.kind];
+    const root = e.root;
+    if (!role) {
+      const mat = new THREE.MeshLambertMaterial({ color: T.color, emissive: T.color, emissiveIntensity: 0.35 });
+      const mesh = new THREE.Mesh(T.geo, mat);
+      mesh.add(new THREE.LineSegments(T.edges, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })));
+      root.add(mesh);
+      e.vis = mesh; e.hit = mesh; e.mats = [mat]; e.baseY = T.y; e.cy = T.y;
+      e.spin = true;
+      return;
+    }
+    const vis = THREE.SkeletonUtils.clone(role.tpl);
+    const mats = [];
+    const cl = (m) => { const c = m.clone(); mats.push(c); return c; };
+    let skinned = null;
+    vis.traverse((o) => {
+      if (!o.isMesh) return;
+      o.material = Array.isArray(o.material) ? o.material.map(cl) : cl(o.material);
+      if (o.isSkinnedMesh) skinned = o;
+    });
+    root.add(vis);
+    const [hw, hh, hd] = role.hit;
+    const hit = new THREE.Mesh(new THREE.BoxGeometry(hw, hh, hd), hitMat);
+    hit.position.y = role.y + hh / 2;
+    root.add(hit);
+    const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: T.color, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.03;
+    ring.scale.setScalar(Math.max(hw, hd) * 1.1);
+    root.add(ring);
+    e.vis = vis; e.hit = hit; e.ring = ring; e.mats = mats;
+    e.baseEmissive = mats.map((m) => (m.emissive ? m.emissive.clone() : null));
+    e.baseY = role.y; e.cy = role.y + hh * 0.6;
+    e.role = role;
+    e.bones = {};
+    if (skinned) for (const b of skinned.skeleton.bones) e.bones[b.name] = b;
+    e.spin = false;
+  }
+
+  function centerOf(e, out) {
+    return (out || new THREE.Vector3()).set(e.x, e.vis.position.y - e.baseY + e.cy, e.z);
+  }
 
   function spawnEnemy() {
     const r = Math.random();
@@ -551,30 +625,31 @@
       z = clamp(Math.sin(a) * rr, -ARENA + 2, ARENA - 2);
       if (!blocked(x, z, T.r + 0.4) && Math.hypot(x - player.x, z - player.z) > 13) break;
     }
-    const mat = new THREE.MeshLambertMaterial({ color: T.color, emissive: T.color, emissiveIntensity: 0.35 });
-    const mesh = new THREE.Mesh(T.geo, mat);
-    mesh.add(new THREE.LineSegments(T.edges, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })));
-    mesh.position.set(x, T.y, z);
-    mesh.scale.setScalar(0.01);
-    scene.add(mesh);
+    const root = new THREE.Group();
+    root.position.set(x, 0, z);
+    root.scale.setScalar(0.01);
+    scene.add(root);
     const hpScale = 1 + Math.floor(wave / 5);
     const e = {
-      kind, T, mesh, mat, x, z,
+      kind, T, root, x, z,
       hp: T.hp * hpScale,
       speed: T.speed * (1 + Math.min(wave, 12) * 0.04),
       cd: T.shoot ? rand(T.shoot[0], T.shoot[1]) + 1 : 0,
       side: Math.random() < 0.5 ? -1 : 1,
-      phase: Math.random() * 6.28, detour: 0, flash: 0, age: 0,
+      phase: Math.random() * 6.28, detour: 0, flash: 0, age: 0, step: 0,
     };
-    mesh.userData.enemy = e;
+    buildEnemyVisual(e);
+    e.hit.userData.enemy = e;
     enemies.push(e);
-    burst(mesh.position, T.color, 8, 4);
+    burst(centerOf(e), T.color, 8, 4);
   }
 
   function removeEnemy(e) {
-    scene.remove(e.mesh);
-    e.mat.dispose();
-    e.mesh.children.forEach((c) => c.material.dispose());
+    scene.remove(e.root);
+    e.mats.forEach((m) => m.dispose());
+    if (e.spin) e.vis.children.forEach((c) => c.material.dispose());
+    if (e.ring) e.ring.material.dispose();
+    if (e.hit !== e.vis) e.hit.geometry.dispose();
     const i = enemies.indexOf(e);
     if (i >= 0) enemies.splice(i, 1);
   }
@@ -582,7 +657,7 @@
   function killEnemy(e) {
     score += e.T.pts * wave;
     kills++;
-    burst(e.mesh.position, e.T.color, e.kind === 'tank' ? 28 : 16, 7);
+    burst(centerOf(e), e.T.color, e.kind === 'tank' ? 28 : 16, 7);
     sfx.kill();
     if (Math.random() < (e.kind === 'tank' ? 0.6 : 0.12)) spawnPickup(e.x, e.z);
     removeEnemy(e);
@@ -597,7 +672,7 @@
 
   function enemyFire(e) {
     const T = e.T;
-    const from = e.mesh.position.clone();
+    const from = centerOf(e);
     const to = new THREE.Vector3(player.x, 1.4, player.z);
     const base = to.sub(from).normalize();
     const n = T.burst || 1;
@@ -610,6 +685,16 @@
       ebullets.push({ m, v: dir.multiplyScalar(T.bspeed), life: 5, dmg: T.dmg });
     }
     sfx.enemyShot();
+  }
+
+  function setGlow(e, glow, flashing) {
+    if (e.spin) { e.mats[0].emissiveIntensity = flashing ? 2.2 : glow; return; }
+    e.mats.forEach((m, i) => {
+      if (!m.emissive) return;
+      if (flashing) m.emissive.setRGB(0.9, 0.9, 0.9);
+      else m.emissive.copy(e.baseEmissive[i]);
+    });
+    e.ring.material.opacity = Math.min(1, 0.25 + glow * 0.4);
   }
 
   function updateEnemies(dt, time) {
@@ -644,25 +729,36 @@
         if (d > 0.001 && d < min) { ax += (sx / d) * 1.5; az += (sz / d) * 1.5; }
       }
       const len = Math.hypot(ax, az);
+      let moved = 0;
       if (len > 0.001) {
         const sp = e.speed * dt;
         const wantX = (ax / len) * sp, wantZ = (az / len) * sp;
         const ox = e.x, oz = e.z;
         moveCircle(e, wantX, wantZ, T.r);
-        const moved = Math.hypot(e.x - ox, e.z - oz);
+        moved = Math.hypot(e.x - ox, e.z - oz);
         if (moved < sp * 0.35 && e.detour <= 0) e.detour = 0.8;
       }
 
-      const bob = Math.sin(time * 2.2 + e.phase) * 0.22;
-      e.mesh.position.set(e.x, T.y + bob, e.z);
-      e.mesh.rotation.y += dt * (e.kind === 'rusher' ? 6 : 1.6);
-      e.mesh.rotation.x += dt * 0.9;
+      e.root.position.set(e.x, 0, e.z);
+      if (e.spin) {
+        e.vis.position.y = T.y + Math.sin(time * 2.2 + e.phase) * 0.22;
+        e.vis.rotation.y += dt * (e.kind === 'rusher' ? 6 : 1.6);
+        e.vis.rotation.x += dt * 0.9;
+      } else {
+        // models always face the player
+        const want = Math.atan2(tx, tz);
+        let dr = want - e.root.rotation.y;
+        dr = Math.atan2(Math.sin(dr), Math.cos(dr));
+        e.root.rotation.y += dr * Math.min(1, dt * 8);
+        e.step += (moved / Math.max(dt, 1e-4)) * dt * 2.2;
+        e.role.animate(e, time, moved > 0.0005 ? 1 : 0);
+      }
 
       let s = Math.min(1, e.age / 0.4);
       let glow = 0.35;
       if (T.shoot) {
         e.cd -= dt;
-        if (e.cd < 0.4) { glow = 0.35 + (Math.sin(time * 40) * 0.5 + 0.5) * 0.9; s *= 1.12; }
+        if (e.cd < 0.4) { glow = 0.35 + (Math.sin(time * 40) * 0.5 + 0.5) * 0.9; s *= 1.08; }
         if (e.cd <= 0) {
           if (dist < 28 && !segBlocked(e.x, e.z, player.x, player.z, 1.4)) {
             enemyFire(e);
@@ -672,18 +768,233 @@
           }
         }
       }
-      if (e.flash > 0) { e.flash -= dt; glow = 2.2; }
-      e.mat.emissiveIntensity = glow;
-      e.mesh.scale.setScalar(s);
+      if (e.flash > 0) e.flash -= dt;
+      setGlow(e, glow, e.flash > 0);
+      e.root.scale.setScalar(s);
 
       if (e.kind === 'rusher' && dist < 1.25) {
-        burst(e.mesh.position, 0xff4d6d, 22, 8);
+        burst(centerOf(e), 0xff4d6d, 22, 8);
         sfx.boom();
         removeEnemy(e);
         hurt(T.dmg);
       }
     }
   }
+
+  // ---------- Custom enemy models (MMD .pmx inside a zip on the player's device) ----------
+  // The files never leave the device: they are read locally and cached in IndexedDB.
+  const bone = (e, n) => e.bones[n];
+  const ROLES = {
+    // SHOOTER: a humanoid that walks on the ground and keeps its distance
+    drone: {
+      match: /莉奈娅|linnea(?!_)/i, height: 1.7, y: 0, hit: [0.7, 1.7, 0.5],
+      animate(e, time, walking) {
+        const sw = Math.sin(e.step) * 0.55 * walking;
+        const idle = Math.sin(time * 2 + e.phase) * 0.04;
+        const set = (n, x, z) => { const b = bone(e, n); if (b) { b.rotation.x = x; if (z !== undefined) b.rotation.z = z; } };
+        // MMD rigs usually deform the legs through the "D" bones; fall back to the plain ones
+        const leg = (n) => (bone(e, n + 'D') ? n + 'D' : n);
+        set(leg('左足'), -sw); set(leg('右足'), sw);
+        set(leg('左ひざ'), Math.max(0, sw) * KNEE); set(leg('右ひざ'), Math.max(0, -sw) * KNEE);
+        set('左腕', sw * 0.35, -ARM_DOWN - idle); set('右腕', -sw * 0.35, ARM_DOWN + idle);
+        e.vis.position.y = Math.abs(Math.sin(e.step)) * 0.04 * walking;
+      },
+    },
+    // RUSHER: a small bug that flies low and fast
+    rusher: {
+      match: /结晶虫|bug/i, height: 0.75, y: 0.35, hit: [0.8, 0.75, 0.8],
+      animate(e, time) {
+        const f = Math.sin(time * 38 + e.phase) * 0.6;
+        const l = bone(e, 'Bone_bugWing01_L'), r = bone(e, 'Bone_bugWing01_R');
+        if (l) l.rotation.z = f;
+        if (r) r.rotation.z = -f;
+        e.vis.position.y = 0.35 + Math.sin(time * 6 + e.phase) * 0.08;
+      },
+    },
+    // TANK: the big winged partner, hovering
+    tank: {
+      match: /搭档|partner/i, height: 1.9, y: 0.4, hit: [1.4, 1.7, 1.1],
+      animate(e, time) {
+        const f = Math.sin(time * 6 + e.phase) * 0.35;
+        for (const [n, s] of [['Bone_WingA01_L', 1], ['Bone_WingA01_R', -1], ['Bone_WingB01_L', 1], ['Bone_WingB01_R', -1]]) {
+          const b = bone(e, n);
+          if (b) b.rotation.z = f * s;
+        }
+        e.vis.position.y = 0.4 + Math.sin(time * 1.8 + e.phase) * 0.15;
+      },
+    },
+  };
+  const ARM_DOWN = 0.6;
+  const KNEE = 0.9;
+
+  const modelUi = { status: $('modelStatus'), clear: $('modelClear'), input: $('modelInput') };
+  function setModelStatus(text, ok) {
+    modelUi.status.textContent = text;
+    modelUi.status.classList.toggle('ok', !!ok);
+  }
+
+  const idb = {
+    open() {
+      return new Promise((res, rej) => {
+        const r = indexedDB.open('pocketstrike', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('files');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    },
+    async run(mode, fn) {
+      const db = await this.open();
+      return new Promise((res, rej) => {
+        const tx = db.transaction('files', mode);
+        const q = fn(tx.objectStore('files'));
+        tx.oncomplete = () => res(q && q.result);
+        tx.onerror = () => rej(tx.error);
+      });
+    },
+    get(k) { return this.run('readonly', (s) => s.get(k)); },
+    set(k, v) { return this.run('readwrite', (s) => s.put(v, k)); },
+    del(k) { return this.run('readwrite', (s) => s.delete(k)); },
+  };
+
+  // Zip entries from Chinese/Japanese tools are often GBK or Shift_JIS without the UTF-8 flag.
+  function decodeName(bytes) {
+    for (const enc of ['utf-8', 'gbk', 'shift_jis']) {
+      try { return new TextDecoder(enc, { fatal: true }).decode(bytes); } catch (_) {}
+    }
+    return new TextDecoder().decode(bytes);
+  }
+  const normPath = (p) => p.replace(/\\/g, '/').replace(/\/\.\//g, '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/').toLowerCase();
+
+  function blobToDataUrl(blob) {
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = () => rej(fr.error);
+      fr.readAsDataURL(blob);
+    });
+  }
+  const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', bmp: 'image/bmp', gif: 'image/gif', spa: 'image/bmp', sph: 'image/bmp' };
+  // Phones run out of GPU memory with a dozen 2K textures, so cap them at 1024px.
+  async function textureDataUrl(blob, ext) {
+    const url = await blobToDataUrl(new Blob([blob], { type: MIME[ext] || 'application/octet-stream' }));
+    if (ext === 'tga') return url;
+    const img = await new Promise((res) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => res(null);
+      im.src = url;
+    });
+    if (!img) return url;
+    const MAX = 1024;
+    const k = Math.min(1, MAX / Math.max(img.naturalWidth, img.naturalHeight));
+    if (k >= 1) return url;
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * k));
+    c.height = Math.max(1, Math.round(img.naturalHeight * k));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/png');
+  }
+
+  const BLANK_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=';
+
+  async function loadModelZip(blob) {
+    if (!window.JSZip || !THREE.MMDLoader || !window.MMDParser || !THREE.SkeletonUtils) {
+      throw new Error('モデル読み込み用のライブラリを取得できませんでした。通信状況を確認してください');
+    }
+    setModelStatus('ZIPを展開中…');
+    const zip = await JSZip.loadAsync(blob, { decodeFileName: decodeName });
+    const files = {};
+    zip.forEach((path, f) => { if (!f.dir) files[normPath(path)] = { f, path }; });
+    const pmx = Object.keys(files).filter((p) => p.endsWith('.pmx'));
+    if (!pmx.length) throw new Error('ZIPの中に .pmx ファイルが見つかりません');
+
+    setModelStatus('テクスチャを準備中…');
+    const urls = {};
+    const imgExt = ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'tga', 'spa', 'sph'];
+    await Promise.all(Object.keys(files).map(async (p) => {
+      const ext = p.split('.').pop();
+      if (!imgExt.includes(ext)) return;
+      urls[p] = await textureDataUrl(await files[p].f.async('blob'), ext);
+    }));
+
+    const manager = new THREE.LoadingManager();
+    manager.setURLModifier((url) => {
+      if (/^(data|blob):/.test(url)) return url;
+      const key = normPath(url.replace(/^mmd\//, ''));
+      return urls[key] || BLANK_PNG;
+    });
+    const loader = new THREE.MMDLoader(manager);
+    const parser = new MMDParser.Parser();
+
+    // Pick a pmx per role by file/model name; fall back to the biggest pmx.
+    const sizes = {};
+    for (const p of pmx) sizes[p] = files[p].f._data ? files[p].f._data.uncompressedSize : 0;
+    const biggest = pmx.slice().sort((a, b) => sizes[b] - sizes[a])[0];
+    const pick = {};
+    for (const kind in ROLES) pick[kind] = pmx.find((p) => ROLES[kind].match.test(files[p].path)) || null;
+    if (!pick.drone && !pick.rusher && !pick.tank) pick.drone = pick.rusher = pick.tank = biggest;
+
+    const loaded = {};
+    const names = {};
+    const out = {};
+    for (const kind in ROLES) {
+      const p = pick[kind];
+      if (!p) continue;
+      if (!loaded[p]) {
+        setModelStatus('モデルを組み立て中… ' + files[p].path);
+        const buf = await files[p].f.async('arraybuffer');
+        const data = parser.parsePmx(buf, true);
+        const dir = p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : '';
+        const mesh = loader.meshBuilder.build(data, 'mmd/' + dir, undefined, () => {});
+        loaded[p] = { mesh, name: data.metadata.modelName || files[p].path };
+      }
+      const role = ROLES[kind];
+      const src = loaded[p].mesh;
+      src.geometry.computeBoundingBox();
+      const bb = src.geometry.boundingBox;
+      const s = role.height / Math.max(0.001, bb.max.y - bb.min.y);
+      const tpl = new THREE.Group();
+      const inst = THREE.SkeletonUtils.clone(src);
+      inst.scale.setScalar(s);
+      inst.position.y = -bb.min.y * s;
+      tpl.add(inst);
+      out[kind] = Object.assign({}, role, { tpl });
+      names[kind] = files[p].path.split('/').pop().replace(/\.pmx$/i, '');
+    }
+    return { out, names };
+  }
+
+  async function applyModelBlob(blob, save) {
+    try {
+      const { out, names } = await loadModelZip(blob);
+      customModels = out;
+      if (save) { try { await idb.set('enemyZip', blob); } catch (_) {} }
+      const label = { drone: 'SHOOTER', rusher: 'RUSHER', tank: 'TANK' };
+      setModelStatus('読み込み完了: ' + Object.keys(names).map((k) => label[k] + '=' + names[k]).join(' / '), true);
+      modelUi.clear.hidden = false;
+    } catch (err) {
+      customModels = null;
+      setModelStatus('読み込めませんでした: ' + (err && err.message ? err.message : err));
+    }
+  }
+
+  modelUi.input.addEventListener('change', () => {
+    const f = modelUi.input.files && modelUi.input.files[0];
+    modelUi.input.value = '';
+    if (f) applyModelBlob(f, true);
+  });
+  modelUi.clear.addEventListener('click', async () => {
+    customModels = null;
+    try { await idb.del('enemyZip'); } catch (_) {}
+    modelUi.clear.hidden = true;
+    setModelStatus('標準の敵を使用中');
+  });
+  (async () => {
+    try {
+      const saved = await idb.get('enemyZip');
+      if (saved) { setModelStatus('保存済みモデルを読み込み中…'); await applyModelBlob(saved, false); }
+    } catch (_) {}
+  })();
 
   function updateBullets(dt) {
     for (let i = ebullets.length - 1; i >= 0; i--) {
@@ -773,7 +1084,7 @@
 
     camera.updateMatrixWorld();
     raycaster.setFromCamera(CENTER, camera);
-    const meshes = enemies.map((e) => e.mesh);
+    const meshes = enemies.map((e) => e.hit);
     const hits = raycaster.intersectObjects(solids.concat(meshes), false);
     const first = hits[0];
     let target = first && first.object.userData.enemy ? first.object.userData.enemy : null;
@@ -785,7 +1096,7 @@
       const fwd = camera.getWorldDirection(tmpV);
       let bestAng = Infinity;
       for (const e of enemies) {
-        tmpV2.copy(e.mesh.position).sub(origin);
+        centerOf(e, tmpV2).sub(origin);
         const d = tmpV2.length();
         if (first && d > first.distance + e.T.r) continue;
         const ang = fwd.angleTo(tmpV2);
@@ -794,7 +1105,7 @@
           bestAng = ang; target = e;
         }
       }
-      if (target) point = target.mesh.position.clone();
+      if (target) point = centerOf(target);
     }
 
     tracer(flash.getWorldPosition(new THREE.Vector3()), point);
@@ -860,7 +1171,7 @@
 
     // crosshair turns red over an enemy
     raycaster.setFromCamera(CENTER, camera);
-    const over = enemies.length && raycaster.intersectObjects(enemies.map((e) => e.mesh), false).length > 0;
+    const over = enemies.length && raycaster.intersectObjects(enemies.map((e) => e.hit), false).length > 0;
     el.cross.classList.toggle('lock', !!over);
   }
 
@@ -877,7 +1188,7 @@
     if (toSpawn > 0) {
       spawnTimer -= dt;
       if (spawnTimer <= 0) {
-        if (enemies.length < 5 + wave) {
+        if (enemies.length < (customModels ? Math.min(5 + wave, 8) : 5 + wave)) {
           spawnEnemy();
           toSpawn--;
           spawnTimer = Math.max(0.45, 1.5 - wave * 0.08);
